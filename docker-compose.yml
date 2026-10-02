@@ -1,0 +1,457 @@
+# docker-compose.yml
+# -------------------
+# Defines the full development environment for the Resilient Big Data Pipeline Platform.
+#
+# Services:
+#   postgres          — Platform's main PostgreSQL 16 database
+#   kafka             — Apache Kafka (KRaft mode, single-node)
+#   spark-master      — Apache Spark master (bitnami/spark:3.5.0)
+#   spark-worker      — Apache Spark worker node
+#   namenode          — HDFS NameNode (bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8)
+#   datanode          — HDFS DataNode  (bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8)
+#   airflow-postgres  — Dedicated Postgres for Airflow metadata (separate from platform DB)
+#   airflow-init      — One-shot DB migration + admin user creation (exits 0 when done)
+#   airflow-webserver — Airflow UI on port 8081
+#   airflow-scheduler — Airflow task scheduler
+#   backend           — FastAPI application
+#   prometheus        — Prometheus metrics scraper
+#   grafana           — Grafana dashboards
+#   frontend          — Web frontend application
+#
+# Usage:
+#   docker-compose up --build          # first run
+#   docker-compose up                  # subsequent runs
+#   docker-compose down -v             # stop and remove all volumes
+
+# ── Shared network ─────────────────────────────────────────────────────────────
+networks:
+  platform-network:
+    driver: bridge
+    name: platform-network
+
+# ── Named volumes ──────────────────────────────────────────────────────────────
+volumes:
+  postgres_data:
+    name: platform_postgres_data
+  kafka_data:
+    name: platform_kafka_data
+  spark_data:
+    name: platform_spark_data
+  namenode_data:
+    name: platform_namenode_data
+  datanode_data:
+    name: platform_datanode_data
+  airflow_postgres_data:
+    name: platform_airflow_postgres_data
+  grafana_data:
+    name: platform_grafana_data
+
+# ── Common Hadoop environment block ────────────────────────────────────────────
+# Shared by namenode and datanode via YAML anchors.
+x-hadoop-env: &hadoop-env
+  CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+  CORE_CONF_hadoop_http_staticuser_user: root
+  HDFS_CONF_dfs_replication: 1
+  HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check: "false"
+
+# ── Common Airflow environment block ───────────────────────────────────────────
+x-airflow-env: &airflow-env
+  AIRFLOW__CORE__EXECUTOR: LocalExecutor
+  # LocalExecutor runs tasks directly in the scheduler process using multiprocessing.
+  # It is the right choice for a single-machine dev/academic setup — no Celery, no
+  # Redis broker needed. For production scale out, switch to CeleryExecutor.
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+  AIRFLOW__CORE__FERNET_KEY: "46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLbfzqDDho="
+  AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+  AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+  AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session"
+  AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+  AIRFLOW__WEBSERVER__WARN_DEPLOYMENT_EXPOSURE: "false"
+  BACKEND_BASE_URL: "http://backend:8000"
+
+# ── Services ───────────────────────────────────────────────────────────────────
+services:
+
+  # ── PostgreSQL (platform main DB) ────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: platform-postgres
+    restart: unless-stopped
+    networks:
+      - platform-network
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB:       ${POSTGRES_DB:-platform_db}
+      POSTGRES_USER:     ${POSTGRES_USER:-platform_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-platform_pass}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U ${POSTGRES_USER:-platform_user} -d ${POSTGRES_DB:-platform_db}
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ── Apache Kafka (KRaft mode) ────────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: platform-kafka
+    restart: unless-stopped
+    networks:
+      - platform-network
+    ports:
+      - "9093:9093"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT'
+      KAFKA_ADVERTISED_LISTENERS: 'INTERNAL://kafka:9092,EXTERNAL://localhost:9093'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
+      KAFKA_LISTENERS: 'INTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:29093,EXTERNAL://0.0.0.0:9093'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'INTERNAL'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_LOG_DIRS: '/var/lib/kafka/data'
+      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - kafka-broker-api-versions --bootstrap-server kafka:9092
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 15s
+
+  # ── Apache Spark Master ──────────────────────────────────────────────────────
+  spark-master:
+    image: bitnamilegacy/spark:3.5.0
+    container_name: platform-spark-master
+    restart: unless-stopped
+    networks:
+      - platform-network
+    environment:
+      SPARK_MODE: master
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+      SPARK_RPC_ENCRYPTION_ENABLED: "no"
+      SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: "no"
+      SPARK_SSL_ENABLED: "no"
+      SPARK_MASTER_WEBUI_PORT: 8080
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    volumes:
+      - ./spark-jobs:/opt/spark-jobs:ro
+      - ./backend/sample-data:/app/sample-data:ro
+      - spark_data:/opt/bitnami/spark/work
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - bash -c '</dev/tcp/localhost/8080'
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # ── Apache Spark Worker ──────────────────────────────────────────────────────
+  spark-worker:
+    image: bitnamilegacy/spark:3.5.0
+    container_name: platform-spark-worker
+    restart: unless-stopped
+    networks:
+      - platform-network
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_WORKER_CORES: 2
+      SPARK_WORKER_MEMORY: 2G
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+      SPARK_RPC_ENCRYPTION_ENABLED: "no"
+      SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: "no"
+      SPARK_SSL_ENABLED: "no"
+    volumes:
+      - ./spark-jobs:/opt/spark-jobs:ro
+      - ./backend/sample-data:/app/sample-data:ro
+      - spark_data:/opt/bitnami/spark/work
+
+  # ── HDFS NameNode ─────────────────────────────────────────────────────────────
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: platform-namenode
+    restart: unless-stopped
+    networks:
+      - platform-network
+    environment:
+      <<: *hadoop-env
+      CLUSTER_NAME: platform-cluster
+    ports:
+      - "9870:9870"   # NameNode Web UI
+      - "9000:9000"   # HDFS RPC port
+    volumes:
+      - namenode_data:/hadoop/dfs/name
+    healthcheck:
+      # Use the WebHDFS REST API to check if the NameNode is out of safe mode
+      test:
+        - CMD-SHELL
+        - curl -sf http://localhost:9870/webhdfs/v1/?op=LISTSTATUS || exit 1
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+
+  # ── HDFS DataNode ─────────────────────────────────────────────────────────────
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: platform-datanode
+    restart: unless-stopped
+    networks:
+      - platform-network
+    depends_on:
+      namenode:
+        condition: service_healthy
+    environment:
+      <<: *hadoop-env
+      SERVICE_PRECONDITION: "namenode:9870"
+    ports:
+      - "9864:9864"   # DataNode Web UI
+    volumes:
+      - datanode_data:/hadoop/dfs/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -sf http://localhost:9864/ || exit 1
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ── Airflow dedicated PostgreSQL ──────────────────────────────────────────────
+  # Airflow requires its own metadata database. We deliberately keep it separate
+  # from the platform's main postgres service to isolate concerns — Airflow runs
+  # its own schema migrations (alembic-based) and its data must never compete
+  # with platform pipeline data for connection pool space or migrations.
+  airflow-postgres:
+    image: postgres:16-alpine
+    container_name: platform-airflow-postgres
+    restart: unless-stopped
+    networks:
+      - platform-network
+    environment:
+      POSTGRES_DB: airflow
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+    volumes:
+      - airflow_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U airflow -d airflow
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ── Airflow DB init (one-shot) ────────────────────────────────────────────────
+  # Runs once: migrates the Airflow metadata DB and creates the admin user.
+  # ``service_completed_successfully`` lets webserver/scheduler proceed only
+  # after this exits with code 0 — exactly what the official Airflow quickstart
+  # recommends to avoid race conditions on first boot.
+  airflow-init:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    container_name: platform-airflow-init
+    networks:
+      - platform-network
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+    environment:
+      <<: *airflow-env
+    command: bash -c "airflow db migrate && airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com"
+    restart: "no"   # one-shot — must NOT restart
+
+  # ── Airflow Webserver ─────────────────────────────────────────────────────────
+  airflow-webserver:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    container_name: platform-airflow-webserver
+    restart: unless-stopped
+    networks:
+      - platform-network
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *airflow-env
+    ports:
+      - "8081:8080"   # Airflow UI — 8081 on host to avoid clash with Spark's 8080
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags:ro
+      - ./backend/sample-data:/app/sample-data:ro
+    command: webserver
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -sf http://localhost:8080/health || exit 1
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ── Airflow Scheduler ─────────────────────────────────────────────────────────
+  airflow-scheduler:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    container_name: platform-airflow-scheduler
+    restart: unless-stopped
+    networks:
+      - platform-network
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *airflow-env
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags:ro
+      - ./backend/sample-data:/app/sample-data:ro
+    command: scheduler
+
+  # ── Backend (FastAPI) ─────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: platform-backend
+    # The backend runs as the non-root appuser. Grant only the socket group so
+    # ChaosLab can control the platform containers after SafetyValidator checks.
+    group_add:
+      - "0"
+    restart: unless-stopped
+    networks:
+      - platform-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      spark-master:
+        condition: service_healthy
+      namenode:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-platform_user}:${POSTGRES_PASSWORD:-platform_pass}@postgres:5432/${POSTGRES_DB:-platform_db}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_JOBS_PATH: /app/spark-jobs
+      HDFS_NAMENODE_URL: http://namenode:9870
+      HDFS_USER: root
+      # ── Phase 7: ChaosLab Reliability Engine ─────────────────────────────────
+      # PROJECT_CONTAINER_PREFIX must match the Docker Compose project name
+      # (the directory name or COMPOSE_PROJECT_NAME env var).
+      # SafetyValidator uses this to verify containers belong to THIS project.
+      PROJECT_CONTAINER_PREFIX: ${COMPOSE_PROJECT_NAME:-resilient-big-data-platform}
+    volumes:
+      - ./backend/app:/app/app:ro
+      - ./backend/alembic:/app/alembic:ro
+      - ./backend/alembic.ini:/app/alembic.ini:ro
+      - ./spark-jobs:/app/spark-jobs:ro
+      - ./backend/sample-data:/app/sample-data:ro
+      # ── Phase 7: Docker socket mount — SECURITY NOTE ─────────────────────────
+      # The ChaosLab Reliability Engine requires Docker socket access so that
+      # DockerController can stop/start/restart platform containers and exec
+      # stress commands inside them for fault injection.
+      #
+      # Security trade-off (deliberate and isolated):
+      #   - Access is granted to the BACKEND SERVICE ONLY.
+      #   - The SafetyValidator enforces a strict application-layer allow-list
+      #     (ALLOWED_TARGET_SERVICES in safety.py) so only the 7 declared
+      #     platform services can ever be targeted.
+      #   - The com.docker.compose.project label is checked on every target
+      #     container — containers from other projects are structurally rejected.
+      #   - In production, replace this with a Docker-in-Docker proxy or
+      #     a dedicated chaos agent with fine-grained RBAC rather than raw socket.
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+
+  # ── Prometheus ────────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.54.0
+    container_name: platform-prometheus
+    networks:
+      - platform-network
+    volumes:
+      - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - '9090:9090'
+    command: ['--config.file=/etc/prometheus/prometheus.yml', '--storage.tsdb.retention.time=7d']
+    depends_on:
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9090/-/healthy || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Grafana ───────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:11.2.2
+    container_name: platform-grafana
+    networks:
+      - platform-network
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-grafana123}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./infrastructure/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infrastructure/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - '3001:3000'
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Frontend ──────────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: platform-frontend
+    networks:
+      - platform-network
+    ports:
+      - '3000:80'
+    depends_on:
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:80/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

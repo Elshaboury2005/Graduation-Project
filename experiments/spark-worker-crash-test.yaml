@@ -1,0 +1,29 @@
+# experiments/spark-worker-crash-test.yaml
+# ─────────────────────────────────────────
+# ChaosLab experiment: restart the Spark worker to simulate a worker crash.
+#
+# container_restart is an instantaneous fault — the worker exits and
+# immediately restarts.  The Spark master re-registers the worker automatically.
+#
+# Expected outcome:
+#   - Running jobs fail-over to the master or retry after reconnect.
+#   - Worker re-registers with the master within 60 seconds.
+#   - No data loss (Spark checkpointing / job retry handles in-flight tasks).
+#
+# Note: duration is accepted by the schema but has no effect for container_restart
+# (restart completes synchronously — the container is running again by the time
+# inject() returns).
+
+experiment:
+  name: spark-worker-crash-test
+
+target:
+  service: spark-worker
+
+fault:
+  type: container_restart
+  duration: 5       # Not meaningful for restart — accepted for schema uniformity
+
+validation:
+  expected_data_loss: 0
+  max_recovery_time: 60

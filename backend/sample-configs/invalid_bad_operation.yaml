@@ -1,0 +1,46 @@
+# invalid_bad_operation.yaml
+# ---------------------------
+# INTENTIONALLY INVALID: contains a processing operation with an unrecognised
+# 'type' value ('transform_magic') that is not one of the allowed literals.
+#
+# Expected behaviour:
+#   - PipelineConfigParser.parse_string() raises ConfigValidationError
+#   - The errors list references "processing.operations.0" or similar
+#   - The discriminated union fails to match any variant
+#   - POST /api/pipelines/validate returns {"valid": false, "errors": [...]}
+
+pipeline:
+  name: bad-ops-pipeline
+  version: "1.0"
+
+source:
+  type: csv
+  path: /data/input/data.csv
+
+schema:
+  - name: id
+    type: string
+  - name: score
+    type: double
+
+processing:
+  operations:
+    # This operation type does not exist in the allowed set:
+    # remove_nulls | remove_duplicates | filter | select_columns |
+    # rename_columns | type_conversion | aggregate
+    - type: transform_magic
+      spell: "wingardium leviosa"
+      power_level: 9000
+
+streaming:
+  enabled: false
+
+processing_engine:
+  type: spark
+
+storage:
+  type: local
+  path: /data/output/bad-ops
+
+monitoring:
+  enabled: false

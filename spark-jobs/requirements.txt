@@ -1,0 +1,8 @@
+# spark-jobs/requirements.txt
+# ----------------------------
+# Extra Python dependencies for the spark-jobs package.
+# PySpark itself is already present in the bitnami/spark base image.
+# Only list packages NOT in the base image.
+
+# No additional deps required beyond PySpark for these jobs.
+# Add here if future jobs need e.g. boto3, delta-spark, etc.

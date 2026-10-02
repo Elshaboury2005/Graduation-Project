@@ -1,0 +1,64 @@
+# .gitignore
+# -----------
+# Files and directories to exclude from version control.
+
+# ── Environment / Secrets ──────────────────────────────────────────────────────
+.env
+*.env.local
+*.env.production
+*.env.staging
+
+# ── Python ─────────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual environments ───────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Testing ─────────────────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+nosetests.xml
+
+# ── Type checking ──────────────────────────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyright/
+
+# ── IDE / Editor ───────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Docker ─────────────────────────────────────────────────────────────────────
+# (docker-compose.override.yml can contain local secrets — keep it out)
+docker-compose.override.yml
+
+# ── Alembic ────────────────────────────────────────────────────────────────────
+# Keep all migration scripts, but ignore any local override ini
+alembic.local.ini
+
+# ── Misc ───────────────────────────────────────────────────────────────────────
+*.log
+*.tmp
+*.bak

@@ -1,0 +1,35 @@
+# experiments/network-disruption-test.yaml
+# ─────────────────────────────────────────
+# ChaosLab experiment: apply 100% packet loss to the Kafka broker's eth0
+# interface for 15 seconds using tc netem.
+#
+# This tests the platform's resilience to a network partition — the broker
+# process is running but unreachable.  This is more realistic than a full
+# container stop because:
+#   - The broker stays alive (no OS-level recovery needed).
+#   - Producers and consumers must handle connection timeouts gracefully.
+#   - The partition rule is removed via rollback; no manual cleanup needed.
+#
+# Requirements:
+#   The kafka container image must have iproute2 (tc) installed.
+#   With confluentinc/cp-kafka:7.6.0, iproute2 is pre-installed.
+#
+# Expected outcome:
+#   - Producers timeout and retry during the 15s outage.
+#   - After rollback, the network rule is removed and the broker is reachable.
+#   - System recovers within 30 seconds of rollback.
+#   - Zero data loss (producer retries + broker persistence).
+
+experiment:
+  name: network-disruption-test
+
+target:
+  service: kafka
+
+fault:
+  type: network_disruption
+  duration: 15
+
+validation:
+  expected_data_loss: 0
+  max_recovery_time: 30

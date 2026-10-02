@@ -1,0 +1,30 @@
+# experiments/kafka-failure-test.yaml
+# ─────────────────────────────────────
+# ChaosLab experiment: stop the Kafka broker for 20 seconds.
+#
+# Expected outcome:
+#   - The platform detects the broker outage.
+#   - Messages are buffered (producer retries) during the outage.
+#   - The broker recovers and the system resumes within 30 seconds.
+#   - Zero data loss (producer acks=all guarantees durability).
+#
+# Run via API:
+#   POST /api/experiments/{id}/run   (with this YAML as `yaml_content`)
+#
+# Verify manually:
+#   docker ps     ← shows `kafka` container exiting then restarting
+#   GET /api/experiments/{id}  ← shows live lifecycle stage
+
+experiment:
+  name: kafka-failure-test
+
+target:
+  service: kafka
+
+fault:
+  type: container_stop
+  duration: 20
+
+validation:
+  expected_data_loss: 0
+  max_recovery_time: 30

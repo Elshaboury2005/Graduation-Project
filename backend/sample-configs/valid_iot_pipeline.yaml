@@ -1,0 +1,56 @@
+# valid_iot_pipeline.yaml
+# ------------------------
+# A valid pipeline configuration for processing IoT sensor telemetry data.
+# Uses JSON source, batch mode (streaming disabled), and local storage.
+# Demonstrates a second real-world use case distinct from the sales pipeline.
+
+pipeline:
+  name: iot-sensor-pipeline
+  version: "2.1"
+
+source:
+  type: json
+  path: /data/raw/iot/sensors.json
+
+schema:
+  - name: device_id
+    type: string
+  - name: temperature
+    type: double
+  - name: humidity
+    type: double
+  - name: pressure
+    type: double
+  - name: recorded_at
+    type: timestamp
+
+processing:
+  operations:
+    - type: remove_nulls
+    - type: remove_duplicates
+    - type: filter
+      condition: "temperature > -50 and temperature < 100"
+    - type: filter
+      condition: "humidity >= 0 and humidity <= 100"
+    - type: select_columns
+      columns: ["device_id", "temperature", "humidity", "recorded_at"]
+    - type: rename_columns
+      mapping:
+        recorded_at: event_time
+    - type: aggregate
+      group_by: device_id
+      operation: avg
+      field: temperature
+
+streaming:
+  enabled: false
+
+processing_engine:
+  type: spark
+
+storage:
+  type: local
+  path: /data/processed/iot
+
+monitoring:
+  enabled: true

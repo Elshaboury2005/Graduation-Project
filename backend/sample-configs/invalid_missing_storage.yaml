@@ -1,0 +1,41 @@
+# invalid_missing_storage.yaml
+# -----------------------------
+# INTENTIONALLY INVALID: the required 'storage' section is missing entirely.
+#
+# Expected behaviour:
+#   - PipelineConfigParser.parse_string() raises ConfigValidationError
+#   - The errors list contains {"field": "storage", "message": "Field required"}
+#   - POST /api/pipelines/validate returns {"valid": false, "errors": [...]}
+
+pipeline:
+  name: broken-pipeline
+  version: "1.0"
+
+source:
+  type: csv
+  path: /data/input/records.csv
+
+schema:
+  - name: id
+    type: string
+  - name: value
+    type: double
+  - name: category
+    type: string
+
+processing:
+  operations:
+    - type: remove_nulls
+    - type: filter
+      condition: "value > 0"
+
+streaming:
+  enabled: false
+
+processing_engine:
+  type: spark
+
+monitoring:
+  enabled: false
+
+# storage: section intentionally omitted to trigger a validation error

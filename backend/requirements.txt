@@ -1,0 +1,53 @@
+# ── Web framework ──────────────────────────────────────────────────────────────
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+prometheus-client==0.21.0
+python-multipart==0.0.12
+
+# ── Database ────────────────────────────────────────────────────────────────────
+sqlalchemy==2.0.36
+asyncpg==0.30.0
+psycopg2-binary==2.9.10
+alembic==1.14.0
+
+# ── Configuration / YAML parsing ───────────────────────────────────────────────
+PyYAML==6.0.2
+
+# ── Data processing + storage (Phase 3) ────────────────────────────────────────
+pandas==2.2.3
+pyarrow==18.1.0
+requests==2.32.3
+scikit-learn==1.5.2
+
+# ── HDFS client (Phase 6) — WebHDFS via NameNode REST API ──────────────────────
+hdfs==2.7.3
+
+# ── Docker SDK (Phase 7) — ChaosLab fault injection via DockerController ────────
+# Requires the Docker socket to be mounted: /var/run/docker.sock:/var/run/docker.sock
+# (backend service only — see docker-compose.yml for the security trade-off comment)
+docker==7.1.0
+
+# ── Messaging / Kafka (Phase 4) ────────────────────────────────────────────────
+confluent-kafka==2.8.0
+
+# ── Settings & validation ───────────────────────────────────────────────────────
+pydantic==2.10.3
+pydantic-settings==2.6.1
+python-dotenv==1.0.1
+
+# ── Auth & security ─────────────────────────────────────────────────────────────
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# ── HTTP client (needed for /api/system/status checks) ─────────────────────────
+httpx==0.28.1
+
+# ── Testing ─────────────────────────────────────────────────────────────────────
+pytest==8.3.4
+pytest-asyncio==0.24.0
+anyio==4.7.0
+
+# ── Spark job submission (backend submitter uses httpx; pyspark for local spark-jobs tests) ──
+# pyspark is optional on the backend — it is NOT imported by the FastAPI app itself.
+# Install it only if you want to run spark-jobs/tests/ locally against a local SparkSession.
+# pyspark==3.5.0   # Uncomment to run spark-jobs/tests/ without Docker

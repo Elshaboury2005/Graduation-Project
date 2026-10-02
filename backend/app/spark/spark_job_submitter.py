@@ -1,0 +1,271 @@
+"""
+app/spark/spark_job_submitter.py
+----------------------------------
+Submits PySpark jobs to the Spark cluster via ``spark-submit`` and parses
+the job result from the subprocess stdout.
+
+Design decisions
+-----------------
+* **asyncio.create_subprocess_exec** is used so the FastAPI event loop is
+  not blocked while Spark runs (can take minutes for large datasets).
+* The ``SPARK_JOB_RESULT:`` prefix protocol lets us extract structured
+  metrics from stdout without any file-system side-channel.
+* On timeout the subprocess is forcibly killed (``proc.kill()``) and then
+  waited to reap the zombie before raising ``SparkJobTimeoutError``.
+* ``health_check()`` calls the Spark master REST API (``/json/``) so the
+  ``GET /api/spark/health`` endpoint and ``GET /api/system/status`` can
+  report real cluster state.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+from typing import Any
+
+import httpx
+
+from app.core.config import get_settings
+from app.spark.exceptions import SparkJobFailedError, SparkJobTimeoutError
+
+logger = logging.getLogger(__name__)
+
+# Prefix that batch_processing_job.py prints to stdout
+_RESULT_PREFIX = "SPARK_JOB_RESULT:"
+
+
+class SparkJobSubmitter:
+    """
+    Submits ``spark-submit`` jobs and interprets their output.
+
+    All public methods are async to avoid blocking the FastAPI event loop
+    while waiting for Spark jobs, which can run for minutes.
+
+    Usage::
+
+        submitter = SparkJobSubmitter()
+        result = await submitter.submit_batch_job(
+            input_source="/data/sales.csv",
+            output_path="/output/sales",
+            processing_config={"processing": {"operations": [...]}},
+        )
+        print(result)  # {"input_rows": 20, "output_rows": 18, ...}
+    """
+
+    def __init__(self) -> None:
+        """Initialise with settings from the environment."""
+        self._settings = get_settings()
+
+    # ── Public API ─────────────────────────────────────────────────────────────
+
+    async def submit_batch_job(
+        self,
+        input_source: str,
+        output_path: str,
+        processing_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Submit ``batch_processing_job.py`` to the Spark cluster.
+
+        Parameters
+        ----------
+        input_source : str
+            Absolute path to the input CSV or JSON file (must be accessible
+            from within the Spark worker containers via the shared volume).
+        output_path : str
+            Absolute path where the job should write Parquet output.
+        processing_config : dict
+            Full pipeline processing configuration serialised and passed as
+            ``--config-json``.
+
+        Returns
+        -------
+        dict
+            Parsed result dict from the ``SPARK_JOB_RESULT:`` stdout line:
+            ``{"input_rows": int, "output_rows": int, "duration_seconds": float,
+            "status": "success"}``.
+
+        Raises
+        ------
+        SparkJobTimeoutError
+            Subprocess exceeded ``SPARK_SUBMIT_TIMEOUT_SECONDS``.
+        SparkJobFailedError
+            Subprocess exited non-zero.
+        """
+        jobs_path = self._settings.SPARK_JOBS_PATH
+        job_script = f"{jobs_path}/batch_processing_job.py"
+        config_json = json.dumps(processing_config)
+
+        spark_home = os.environ.get("SPARK_HOME", "/opt/bitnami/spark")
+        cmd = [
+            f"{spark_home}/bin/spark-submit",
+            "--master", self._settings.SPARK_MASTER_URL,
+            job_script,
+            "--config-json", config_json,
+            "--input-source", input_source,
+            "--output-path", output_path,
+        ]
+
+        logger.info(
+            "Submitting batch Spark job: input=%s output=%s master=%s",
+            input_source,
+            output_path,
+            self._settings.SPARK_MASTER_URL,
+        )
+
+        stdout, stderr = await self._run_subprocess(cmd)
+        return self._parse_result(stdout, stderr)
+
+    async def health_check(self) -> dict[str, Any]:
+        """
+        Probe the Spark master REST API to confirm cluster availability.
+
+        Calls ``http://spark-master:8080/json/`` and extracts worker count
+        and status from the JSON response.
+
+        Returns
+        -------
+        dict
+            ``{"connected": bool, "worker_count": int, "status": str,
+            "error": str | None}``
+        """
+        # Derive the master UI URL from the spark master URL
+        # spark://spark-master:7077 → http://spark-master:8080
+        master_url = self._settings.SPARK_MASTER_URL  # spark://spark-master:7077
+        try:
+            host = master_url.replace("spark://", "").split(":")[0]
+            ui_url = f"http://{host}:8080/json/"
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(ui_url)
+                resp.raise_for_status()
+                data = resp.json()
+            worker_count = len(data.get("workers", []))
+            status = data.get("status", "UNKNOWN")
+            logger.info(
+                "Spark health check: status=%s workers=%d", status, worker_count
+            )
+            return {
+                "connected": True,
+                "worker_count": worker_count,
+                "status": status,
+                "error": None,
+            }
+        except Exception as exc:
+            logger.warning("Spark health check failed: %s", exc)
+            return {
+                "connected": False,
+                "worker_count": 0,
+                "status": "UNREACHABLE",
+                "error": str(exc),
+            }
+
+    # ── Private helpers ────────────────────────────────────────────────────────
+
+    async def _run_subprocess(
+        self, cmd: list[str]
+    ) -> tuple[str, str]:
+        """
+        Execute *cmd* asynchronously, enforcing the configured timeout.
+
+        Parameters
+        ----------
+        cmd : list[str]
+            Command and arguments to execute.
+
+        Returns
+        -------
+        tuple[str, str]
+            ``(stdout, stderr)`` as decoded strings.
+
+        Raises
+        ------
+        SparkJobTimeoutError
+            Process exceeded ``SPARK_SUBMIT_TIMEOUT_SECONDS``.
+        SparkJobFailedError
+            Process exited with a non-zero return code.
+        """
+        timeout = self._settings.SPARK_SUBMIT_TIMEOUT_SECONDS
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, "HADOOP_USER_NAME": self._settings.HDFS_USER},
+        )
+        try:
+            raw_stdout, raw_stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=float(timeout)
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise SparkJobTimeoutError(
+                f"spark-submit timed out after {timeout}s",
+                stdout="",
+                stderr="",
+            )
+
+        stdout = raw_stdout.decode("utf-8", errors="replace")
+        stderr = raw_stderr.decode("utf-8", errors="replace")
+
+        if proc.returncode != 0:
+            diagnostic_lines = (stderr + "\n" + stdout).splitlines()
+            markers = ("error", "exception", "caused by", "failed", "denied")
+            matches = [
+                index
+                for index, line in enumerate(diagnostic_lines)
+                if any(marker in line.lower() for marker in markers)
+            ]
+            selected: list[str] = []
+            for index in matches:
+                selected.extend(diagnostic_lines[max(0, index - 2) : index + 4])
+            diagnostic = "\n".join(dict.fromkeys(selected)) or "\n".join(diagnostic_lines[-40:])
+            raise SparkJobFailedError(
+                f"spark-submit exited with code {proc.returncode}",
+                stdout=stdout,
+                stderr=diagnostic,
+            )
+
+        return stdout, stderr
+
+    def _parse_result(self, stdout: str, stderr: str) -> dict[str, Any]:
+        """
+        Extract the ``SPARK_JOB_RESULT:`` line from *stdout*.
+
+        Parameters
+        ----------
+        stdout : str
+            Full stdout from the ``spark-submit`` process.
+        stderr : str
+            Full stderr (used in error message if no result line found).
+
+        Returns
+        -------
+        dict
+            Parsed result dict.
+
+        Raises
+        ------
+        SparkJobFailedError
+            No ``SPARK_JOB_RESULT:`` line was found in stdout.
+        """
+        for line in stdout.splitlines():
+            stripped = line.strip()
+            if stripped.startswith(_RESULT_PREFIX):
+                json_part = stripped[len(_RESULT_PREFIX):]
+                try:
+                    return json.loads(json_part)
+                except json.JSONDecodeError as exc:
+                    raise SparkJobFailedError(
+                        f"Could not parse SPARK_JOB_RESULT JSON: {exc}",
+                        stdout=stdout,
+                        stderr=stderr,
+                    ) from exc
+
+        raise SparkJobFailedError(
+            "No SPARK_JOB_RESULT line found in spark-submit output. "
+            "The job may have failed before completing.",
+            stdout=stdout,
+            stderr=stderr,
+        )

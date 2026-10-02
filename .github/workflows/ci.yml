@@ -1,0 +1,84 @@
+name: CI/CD Pipeline
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: pip install black ruff
+      - run: black --check backend/ spark-jobs/
+      - run: ruff check backend/ spark-jobs/
+      - uses: actions/setup-node@v4
+        with: {node-version: '20'}
+      - run: cd frontend && npm ci
+      - run: cd frontend && npm run lint
+
+  unit-tests:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: pip install -r backend/requirements.txt
+      - run: cd backend && pytest tests/ -m 'not integration' --tb=short -q
+      - uses: actions/setup-node@v4
+        with: {node-version: '20'}
+      - run: cd frontend && npm ci && npm test
+
+  integration-tests:
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker-compose up -d --build
+      - name: Wait for stack to be healthy
+        run: |
+          echo 'Waiting for backend health...'
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8000/health; then
+              echo 'Backend healthy!'
+              break
+            fi
+            echo "Attempt $i/60 — waiting 5s..."
+            sleep 5
+          done
+      - run: pip install pytest httpx
+      - run: cd backend && pytest tests/ -m integration --tb=short -q
+      - run: pytest tests/e2e/ -v --tb=short
+      - if: always()
+        run: docker-compose down -v
+
+  build-images:
+    runs-on: ubuntu-latest
+    needs: integration-tests
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t platform-backend backend/
+      - run: docker build -t platform-frontend frontend/
+      - run: docker build -t platform-spark-jobs spark-jobs/
+
+  security-checks:
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: pip install pip-audit
+      - run: pip-audit -r backend/requirements.txt --output=json > security-report.json || true
+      - uses: actions/setup-node@v4
+        with: {node-version: '20'}
+      - run: cd frontend && npm ci && npm audit --json > ../npm-audit.json || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: '*.json'
