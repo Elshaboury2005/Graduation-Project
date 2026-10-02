@@ -42,6 +42,7 @@ reliability purposes without first passing through this module.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from app.core.config import get_settings
@@ -76,6 +77,30 @@ This is intentionally a ``frozenset`` (immutable) — nothing can add entries
 at runtime.  To add a new allowed service, it must be added here explicitly
 in a code review, not by configuration.
 """
+
+ACTIVE_EXPERIMENT_STATUSES: frozenset[str] = frozenset(
+    {
+        "created",
+        "pending",
+        "validating",
+        "preparing",
+        "baseline",
+        "injecting",
+        "monitoring",
+        "rolling_back",
+        "waiting_for_recovery",
+        "validating_data",
+        "collecting_metrics",
+        "analyzing",
+        "cleaning_up",
+        "generating_report",
+    }
+)
+"""All non-terminal ChaosLab lifecycle states."""
+
+TERMINAL_EXPERIMENT_STATUSES: frozenset[str] = frozenset(
+    {"succeeded", "failed", "cancelled"}
+)
 
 
 class SafetyValidator:
@@ -260,12 +285,15 @@ class SafetyValidator:
                 "This limit is enforced regardless of YAML configuration."
             )
 
-    def enforce_max_concurrent_experiments(self, db_session) -> None:
+    def enforce_max_concurrent_experiments(
+        self, db_session, excluding_run_id=None
+    ) -> None:
         """
         Reject a new experiment if one is already running.
 
-        Queries the ``experiment_runs`` table for rows with ``status='running'``
-        and raises ``TooManyConcurrentExperimentsError`` if any exist.
+        The PostgreSQL advisory lock serializes the count-and-start decision
+        across backend workers. The caller's already-created ``pending`` run
+        is excluded from the count.
 
         Parameters
         ----------
@@ -278,17 +306,61 @@ class SafetyValidator:
         TooManyConcurrentExperimentsError
             If one or more experiments currently have ``status='running'``.
         """
-        from sqlalchemy import select, func
+        from sqlalchemy import func, select, text
         from app.models.experiment_run import ExperimentRun
 
+        bind = db_session.get_bind()
+        if bind.dialect.name == "postgresql":
+            db_session.execute(text("SELECT pg_advisory_xact_lock(918273645)"))
+
         stmt = select(func.count()).select_from(ExperimentRun).where(
-            ExperimentRun.status == "running"
+            ExperimentRun.status.in_(ACTIVE_EXPERIMENT_STATUSES)
         )
+        if excluding_run_id is not None:
+            stmt = stmt.where(ExperimentRun.id != excluding_run_id)
         running_count = db_session.execute(stmt).scalar_one()
 
         if running_count > 0:
             raise TooManyConcurrentExperimentsError(running_count=running_count)
 
         logger.debug(
-            "SafetyValidator: concurrency check passed (0 running experiments)."
+            "SafetyValidator: concurrency check passed (0 other active experiments)."
         )
+
+    def reap_stale_experiments(self, db_session, now: datetime | None = None) -> int:
+        """Fail active runs that outlived their declared recovery window."""
+        from sqlalchemy import select
+        from app.models.experiment_run import ExperimentRun
+
+        now = now or datetime.now(tz=timezone.utc)
+        runs = db_session.execute(
+            select(ExperimentRun).where(
+                ExperimentRun.status.in_(ACTIVE_EXPERIMENT_STATUSES)
+            )
+        ).scalars().all()
+        reaped = 0
+        for run in runs:
+            if run.started_at is None:
+                continue
+            config = (run.params or {}).get("experiment_config", {})
+            fault = config.get("fault", {})
+            validation = config.get("validation", {})
+            max_age = (
+                float(fault.get("duration", 0))
+                + 60
+                + float(validation.get("max_recovery_time", 60))
+            )
+            if (now - run.started_at).total_seconds() <= max_age:
+                continue
+            results = dict(run.results or {})
+            results["error"] = (
+                "Experiment was marked failed after exceeding its fault duration, "
+                "grace period, and maximum recovery time."
+            )
+            run.results = results
+            run.status = "failed"
+            run.finished_at = now
+            reaped += 1
+        if reaped:
+            db_session.flush()
+        return reaped

@@ -35,6 +35,18 @@ class Experiment(Base):
         comment="Optional description of the experiment's goal.",
     )
 
+    experiment_yaml: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        comment="Canonical persisted ChaosLab experiment definition.",
+    )
+
+    pipeline_yaml: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Optional canonical pipeline definition exercised by this experiment.",
+    )
+
     # ── Relationships ──────────────────────────────────────────────────────────
     runs: Mapped[list["ExperimentRun"]] = relationship(  # noqa: F821
         "ExperimentRun",

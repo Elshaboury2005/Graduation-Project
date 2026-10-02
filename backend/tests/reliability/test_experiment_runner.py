@@ -360,3 +360,60 @@ class TestExperimentRunnerLifecycle:
             report = runner.run_experiment(config)
 
         assert report["result"] == "FAIL"
+
+
+class TestPipelineOutputExtraction:
+    """Metric shapes emitted by both executor branches feed data validation."""
+
+    def test_extracts_pandas_storage_output(self) -> None:
+        from app.reliability.experiment_runner import ExperimentRunner
+
+        context = ExperimentRunner._extract_pipeline_output(
+            {
+                "metrics": {
+                    "source:csv": {"rows_out": 12},
+                    "storage:local": {
+                        "rows_written": 8,
+                        "path": "/tmp/output/data.parquet",
+                    },
+                }
+            },
+            pipeline_yaml="",
+        )
+
+        assert context["records_processed"] == 8
+        assert context["output_location"] == {
+            "storage_type": "local",
+            "path": "/tmp/output/data.parquet",
+        }
+
+    def test_extracts_spark_output_and_storage_type_from_plan(self) -> None:
+        from app.reliability.experiment_runner import ExperimentRunner
+
+        context = ExperimentRunner._extract_pipeline_output(
+            {
+                "metrics": {
+                    "spark_job": {
+                        "input_rows": 12,
+                        "output_rows": 7,
+                        "output_path": "hdfs://namenode:9000/data/output",
+                    }
+                }
+            },
+            pipeline_yaml="storage:\n  type: hdfs\n  path: /data/output\n",
+        )
+
+        assert context["records_processed"] == 7
+        assert context["output_location"] == {
+            "storage_type": "hdfs",
+            "path": "hdfs://namenode:9000/data/output",
+        }
+
+    def test_missing_pipeline_validation_is_reported_as_skipped(self) -> None:
+        from app.reliability.experiment_runner import ExperimentRunner
+
+        result = ExperimentRunner._skipped_data_validation()
+
+        assert result["data_validation"] == "skipped"
+        assert result["validation_passed"] is None
+        assert result["data_loss"] is None

@@ -8,6 +8,7 @@ All tests mock the Docker SDK so no real Docker socket is required.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
@@ -187,3 +188,64 @@ class TestEnforceMaxConcurrentExperiments:
         with pytest.raises(TooManyConcurrentExperimentsError) as exc_info:
             safety.enforce_max_concurrent_experiments(mock_db)
         assert "3" in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            "pending", "validating", "preparing", "baseline", "injecting",
+            "monitoring", "rolling_back", "waiting_for_recovery",
+            "validating_data", "collecting_metrics", "analyzing", "cleaning_up",
+            "generating_report",
+        ],
+    )
+    def test_each_active_lifecycle_status_blocks_a_second_experiment(
+        self, status: str
+    ) -> None:
+        """Every non-terminal lifecycle state must count as active."""
+        mock_db = MagicMock()
+        mock_db.execute.return_value.scalar_one.return_value = 1
+
+        with pytest.raises(TooManyConcurrentExperimentsError):
+            SafetyValidator().enforce_max_concurrent_experiments(
+                mock_db, excluding_run_id="current-run"
+            )
+
+    def test_current_pending_run_is_excluded_from_concurrency_count(self) -> None:
+        """The run being started must not reject itself."""
+        mock_db = MagicMock()
+        mock_db.execute.return_value.scalar_one.return_value = 0
+
+        SafetyValidator().enforce_max_concurrent_experiments(
+            mock_db, excluding_run_id="current-run"
+        )
+
+    @pytest.mark.parametrize("status", ["succeeded", "failed", "cancelled"])
+    def test_terminal_statuses_do_not_block(self, status: str) -> None:
+        """Completed runs are not active experiments."""
+        mock_db = MagicMock()
+        mock_db.execute.return_value.scalar_one.return_value = 0
+
+        SafetyValidator().enforce_max_concurrent_experiments(mock_db)
+
+    def test_stale_active_run_is_marked_failed(self) -> None:
+        """Abandoned active runs must not block the platform indefinitely."""
+        stale_run = MagicMock()
+        stale_run.status = "monitoring"
+        stale_run.started_at = datetime.now(tz=timezone.utc) - timedelta(minutes=10)
+        stale_run.params = {
+            "experiment_config": {
+                "fault": {"duration": 5},
+                "validation": {"max_recovery_time": 5},
+            }
+        }
+        stale_run.results = {}
+        mock_db = MagicMock()
+        mock_db.execute.return_value.scalars.return_value.all.return_value = [stale_run]
+
+        reaped = SafetyValidator().reap_stale_experiments(
+            mock_db, now=datetime.now(tz=timezone.utc)
+        )
+
+        assert reaped == 1
+        assert stale_run.status == "failed"
+        assert "exceeding" in stale_run.results["error"]

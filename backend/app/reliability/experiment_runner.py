@@ -127,7 +127,6 @@ class ExperimentRunner:
         fault_duration = experiment_config.fault.duration
 
         # ── SAFETY CHECK: enforce concurrency limit ────────────────────────────
-        self._safety.enforce_max_concurrent_experiments(self._db)
 
         # ── CREATE: persist experiment + run records ───────────────────────────
         if existing_experiment_id:
@@ -167,6 +166,10 @@ class ExperimentRunner:
             self._db.add(run)
             self._db.flush()
         run_id = run.id
+        self._safety.reap_stale_experiments(self._db)
+        self._safety.enforce_max_concurrent_experiments(
+            self._db, excluding_run_id=run_id
+        )
         logger.info(
             "ExperimentRunner: created run %s (experiment=%s).",
             run_id,
@@ -277,27 +280,25 @@ class ExperimentRunner:
         # ── VALIDATE DATA ─────────────────────────────────────────────────────
         self._update_status(run, "validating_data")
         self._check_cancelled(run)
-        output_location = pipeline_context.get("output_location", {})
         expected_records = baseline.get("expected_record_count", 0)
-        if output_location and expected_records > 0:
+        if associated_pipeline_yaml:
+            post_recovery_context = self._prepare(associated_pipeline_yaml)
+            output_location = post_recovery_context.get("output_location", {})
+            if not output_location:
+                raise RuntimeError(
+                    "Post-recovery pipeline run completed without an output location."
+                )
             consistency = self._validator.validate(expected_records, output_location)
+            consistency["data_validation"] = "completed"
         else:
-            consistency = {
-                "expected_records": expected_records,
-                "actual_records": expected_records,
-                "data_loss": 0,
-                "data_loss_percentage": 0.0,
-                "duplicate_ids_found": 0,
-                "id_column": None,
-                "validation_passed": True,
-            }
+            consistency = self._skipped_data_validation()
         self._merge_results(run, consistency)
 
         # ── COLLECT METRICS ───────────────────────────────────────────────────
         self._update_status(run, "collecting_metrics")
         elapsed_total = time.monotonic() - experiment_start
         throughput = self._metrics.compute_throughput(
-            records_processed=consistency.get("actual_records", 0),
+            records_processed=consistency.get("actual_records") or 0,
             duration_seconds=elapsed_total,
         )
         self._merge_results(run, {"throughput_records_per_sec": throughput})
@@ -308,7 +309,7 @@ class ExperimentRunner:
         result = self._analyze(
             experiment_config=experiment_config,
             recovery_time=recovery_time,
-            data_loss=consistency.get("data_loss", 0),
+            data_loss=consistency.get("data_loss") or 0,
         )
         self._merge_results(run, {"result": result})
 
@@ -339,6 +340,65 @@ class ExperimentRunner:
         self._safety.validate_target(experiment_config.target.service)
         self._safety.validate_duration(experiment_config.fault.duration)
 
+    @staticmethod
+    def _extract_pipeline_output(result: dict, pipeline_yaml: str) -> dict:
+        """Extract processed output metadata from executor metric shapes."""
+        metrics = result.get("metrics", {})
+        spark_job = metrics.get("spark_job")
+        if isinstance(spark_job, dict) and spark_job.get("output_path"):
+            storage_type = "hdfs" if spark_job["output_path"].startswith("hdfs://") else "local"
+            try:
+                import yaml
+
+                storage_type = (
+                    (yaml.safe_load(pipeline_yaml) or {})
+                    .get("storage", {})
+                    .get("type", storage_type)
+                )
+            except Exception:
+                pass
+            return {
+                "records_processed": int(spark_job.get("output_rows") or 0),
+                "output_location": {
+                    "storage_type": storage_type,
+                    "path": spark_job["output_path"],
+                },
+                "pipeline_run_result": result,
+            }
+
+        for metric_name, metric in metrics.items():
+            if not metric_name.startswith("storage:") or not isinstance(metric, dict):
+                continue
+            path = metric.get("path") or metric.get("hdfs_path")
+            if path:
+                return {
+                    "records_processed": int(metric.get("rows_written") or 0),
+                    "output_location": {
+                        "storage_type": metric_name.split(":", 1)[1],
+                        "path": path,
+                    },
+                    "pipeline_run_result": result,
+                }
+        return {
+            "records_processed": 0,
+            "output_location": {},
+            "pipeline_run_result": result,
+        }
+
+    @staticmethod
+    def _skipped_data_validation() -> dict:
+        """Return an explicit non-result when no pipeline was supplied."""
+        return {
+            "data_validation": "skipped",
+            "expected_records": None,
+            "actual_records": None,
+            "data_loss": None,
+            "data_loss_percentage": None,
+            "duplicate_ids_found": None,
+            "id_column": None,
+            "validation_passed": None,
+        }
+
     def _prepare(self, pipeline_yaml: str) -> dict:
         """
         Run the associated pipeline if YAML is provided, capture output context.
@@ -352,29 +412,14 @@ class ExperimentRunner:
             from app.services.pipeline_execution_service import run_pipeline_from_yaml
 
             result = run_pipeline_from_yaml(pipeline_yaml)
-            metrics = result.get("metrics", {})
-            storage_meta = metrics.get("storage", {})
-            rows = (
-                storage_meta.get("rows_written")
-                or metrics.get("source_rows")
-                or 0
-            )
-            output_location = {
-                "storage_type": storage_meta.get("type", "local"),
-                "path": storage_meta.get("path", ""),
-            }
-            return {
-                "records_processed": rows,
-                "output_location": output_location,
-                "pipeline_run_result": result,
-            }
+            if result.get("status") != "success":
+                raise RuntimeError(
+                    "Baseline pipeline run failed: "
+                    f"{result.get('errors') or result.get('logs') or result.get('status')}"
+                )
+            return self._extract_pipeline_output(result, pipeline_yaml)
         except Exception as exc:
-            logger.warning(
-                "ExperimentRunner._prepare: pipeline run failed: %s "
-                "(experiment will continue with records_processed=0).",
-                exc,
-            )
-            return {"records_processed": 0, "output_location": {}}
+            raise RuntimeError(f"Pipeline preparation failed: {exc}") from exc
 
     def _analyze(
         self,

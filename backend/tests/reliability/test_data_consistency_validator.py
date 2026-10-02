@@ -168,3 +168,23 @@ class TestDuplicateIdDetection:
         )
         assert result["actual_records"] == 2
         assert result["data_loss"] == 0
+
+    def test_uses_spark_part_files_in_directory(
+        self, validator, tmp_path: Path
+    ) -> None:
+        """Spark output directories contain part files rather than data.parquet."""
+        pd.DataFrame({"order_id": ["o1", "o2"]}).to_parquet(
+            tmp_path / "part-00000.parquet", index=False
+        )
+        pd.DataFrame({"order_id": ["o3"]}).to_parquet(
+            tmp_path / "part-00001.parquet", index=False
+        )
+
+        result = validator.validate(
+            expected_records=4,
+            output_location={"storage_type": "local", "path": str(tmp_path)},
+        )
+
+        assert result["actual_records"] == 3
+        assert result["data_loss"] == 1
+        assert result["validation_passed"] is False

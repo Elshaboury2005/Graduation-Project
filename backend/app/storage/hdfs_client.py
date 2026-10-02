@@ -204,6 +204,7 @@ class HdfsStorageClient:
         HdfsReadError
             If the download or Parquet parsing fails.
         """
+        hdfs_path = self._normalize_hdfs_path(hdfs_path)
         if not self.path_exists(hdfs_path):
             raise HdfsPathNotFoundError(
                 f"HDFS path does not exist: '{hdfs_path}'",
@@ -212,6 +213,27 @@ class HdfsStorageClient:
 
         tmp_path: str | None = None
         try:
+            status = self._hdfs_client.status(hdfs_path)
+            if status and status.get("type") == "DIRECTORY":
+                with tempfile.TemporaryDirectory() as directory:
+                    frames = []
+                    for name in self.list_directory(hdfs_path):
+                        if not str(name).startswith("part-") or not str(name).endswith(".parquet"):
+                            continue
+                        local_path = os.path.join(directory, str(name))
+                        self._hdfs_client.download(
+                            f"{hdfs_path.rstrip('/')}/{name}",
+                            local_path,
+                            overwrite=True,
+                        )
+                        frames.append(pd.read_parquet(local_path))
+                    if not frames:
+                        raise HdfsReadError(
+                            f"No Spark Parquet part files found at '{hdfs_path}'.",
+                            hdfs_path=hdfs_path,
+                        )
+                    return pd.concat(frames, ignore_index=True)
+
             with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
                 tmp_path = f.name
 
@@ -231,6 +253,15 @@ class HdfsStorageClient:
         finally:
             if tmp_path and os.path.exists(tmp_path):
                 os.unlink(tmp_path)
+
+    @staticmethod
+    def _normalize_hdfs_path(hdfs_path: str) -> str:
+        """Convert a Spark hdfs:// URI to the WebHDFS client path form."""
+        if hdfs_path.startswith("hdfs://"):
+            without_scheme = hdfs_path.split("://", 1)[1]
+            slash = without_scheme.find("/")
+            return without_scheme[slash:] if slash >= 0 else "/"
+        return hdfs_path
 
     def path_exists(self, hdfs_path: str) -> bool:
         """

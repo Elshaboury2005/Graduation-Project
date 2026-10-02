@@ -127,12 +127,21 @@ class DataConsistencyValidator:
             pass
 
         # Fallback: local parquet read
-        import pandas as pd
+        import glob
         import os
+        import pandas as pd
 
         if os.path.isdir(path):
-            # LocalStorage writes data.parquet inside the directory
-            parquet_path = os.path.join(path, "data.parquet")
+            # LocalStorage writes data.parquet; Spark writes part-*.parquet.
+            parquet_files = glob.glob(os.path.join(path, "*.parquet"))
+            if not parquet_files:
+                raise FileNotFoundError(f"No Parquet output found in '{path}'.")
+            if len(parquet_files) == 1:
+                return pd.read_parquet(parquet_files[0])
+            return pd.concat(
+                (pd.read_parquet(parquet_file) for parquet_file in parquet_files),
+                ignore_index=True,
+            )
         else:
             parquet_path = path
 

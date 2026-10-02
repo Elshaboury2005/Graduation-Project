@@ -66,7 +66,7 @@ _RUNNING_RUNNERS: dict[str, Any] = {}
 class ExperimentCreateRequest(BaseModel):
     """Request body for POST /api/experiments."""
 
-    yaml_content: str
+    yaml_content: str = ""
     """Raw YAML string of the experiment definition."""
 
     pipeline_yaml: str = ""
@@ -209,22 +209,14 @@ async def create_experiment(
 
     experiment = Experiment(
         name=experiment_config.experiment.name,
-        description=(
-            f"Pending: {experiment_config.fault.type} on "
-            f"{experiment_config.target.service} for "
-            f"{experiment_config.fault.duration}s"
-        ),
+        description=None,
+        experiment_yaml=request.yaml_content,
+        pipeline_yaml=request.pipeline_yaml or None,
     )
     db.add(experiment)
     await db.flush()
     await db.refresh(experiment)
 
-    # Store pipeline YAML in description for later retrieval
-    # (a dedicated column would be cleaner; this is sufficient for Phase 7)
-    experiment.description = (
-        f"pipeline_yaml_attached={bool(request.pipeline_yaml)}"
-    )
-    experiment._pipeline_yaml = request.pipeline_yaml  # transient attribute
     await db.commit()
 
     return ExperimentCreateResponse(
@@ -308,6 +300,9 @@ async def get_experiment(
     return {
         "id": str(experiment.id),
         "name": experiment.name,
+        "description": experiment.description,
+        "experimentYaml": experiment.experiment_yaml,
+        "pipelineYaml": experiment.pipeline_yaml,
         "target": params.get("target_service", "not started"),
         "faultType": params.get("fault_type", "not started"),
         "status": latest_run.status if latest_run else "pending",
@@ -329,9 +324,9 @@ async def get_experiment(
 )
 async def run_experiment(
     experiment_id: uuid.UUID,
-    request: ExperimentCreateRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
+    request: ExperimentCreateRequest | None = None,
 ) -> dict:
     """
     Trigger the ExperimentRunner asynchronously.
@@ -342,13 +337,13 @@ async def run_experiment(
     The request body must contain the experiment YAML (and optionally
     the pipeline YAML) since experiments are stateless definitions.
     """
-    experiment_config = _parse_experiment_yaml(request.yaml_content)
+    experiment_config = None
 
     try:
         from app.reliability.safety import SafetyValidator
 
         safety = SafetyValidator()
-        safety.validate_duration(experiment_config.fault.duration)
+        pass
         # Note: validate_target requires Docker socket — deferred to runner
     except UnsafeTargetError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
@@ -359,6 +354,23 @@ async def run_experiment(
     experiment = await db.get(Experiment, experiment_id)
     if experiment is None:
         raise HTTPException(status_code=404, detail="Experiment not found.")
+
+    if request is not None and request.yaml_content.strip():
+        if (
+            request.yaml_content != experiment.experiment_yaml
+            or (request.pipeline_yaml or None) != experiment.pipeline_yaml
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Run definitions must match the persisted experiment definition.",
+            )
+    if not experiment.experiment_yaml:
+        raise HTTPException(
+            status_code=409,
+            detail="Experiment has no persisted definition; recreate it before running.",
+        )
+    experiment_config = _parse_experiment_yaml(experiment.experiment_yaml)
+    SafetyValidator().validate_duration(experiment_config.fault.duration)
 
     run = ExperimentRun(
         experiment_id=experiment.id,
@@ -382,7 +394,7 @@ async def run_experiment(
         str(experiment_id),
         run_id,
         experiment_config,
-        request.pipeline_yaml,
+        experiment.pipeline_yaml or "",
     )
 
     return {
