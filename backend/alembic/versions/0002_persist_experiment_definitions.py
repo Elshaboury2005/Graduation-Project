@@ -21,6 +21,7 @@ def upgrade() -> None:
         "experiments",
         sa.Column("experiment_yaml", sa.Text(), nullable=True),
     )
+    op.add_column("experiment_runs", sa.Column("stage", sa.String(50), nullable=True))
     op.add_column(
         "experiments",
         sa.Column("pipeline_yaml", sa.Text(), nullable=True),
@@ -31,14 +32,12 @@ def upgrade() -> None:
     op.alter_column("experiments", "experiment_yaml", nullable=False)
     op.execute(
         "CREATE UNIQUE INDEX uq_experiment_runs_single_active ON experiment_runs "
-        "((1)) WHERE status IN ('created', 'pending', 'validating', 'preparing', "
-        "'baseline', 'injecting', 'monitoring', 'rolling_back', "
-        "'waiting_for_recovery', 'validating_data', 'collecting_metrics', "
-        "'analyzing', 'cleaning_up', 'generating_report')"
+        "((1)) WHERE status IN ('pending', 'running')"
     )
 
 
 def downgrade() -> None:
     op.drop_index("uq_experiment_runs_single_active", table_name="experiment_runs")
+    op.drop_column("experiment_runs", "stage")
     op.drop_column("experiments", "pipeline_yaml")
     op.drop_column("experiments", "experiment_yaml")

@@ -156,6 +156,8 @@ class PipelineExecutor:
                 # source already handled above
 
         ctx.status = "success"
+        from app.metrics import pipeline_records_processed_total
+        pipeline_records_processed_total.labels(plan.pipeline_name).inc(len(df))
         ctx.log_info("executor", f"Pipeline '{plan.pipeline_name}' completed successfully.")
         logger.info("Pipeline '%s' run %s completed.", plan.pipeline_name, ctx.run_id)
         return ctx
@@ -179,6 +181,8 @@ class PipelineExecutor:
         duration_ms = round((time.perf_counter() - t0) * 1000, 2)
         rows = len(df)
         ctx.record_stage(step.name, {"rows_out": rows, "duration_ms": duration_ms})
+        from app.metrics import pipeline_processing_latency_seconds
+        pipeline_processing_latency_seconds.labels(step.name).observe(duration_ms / 1000)
         ctx.log_info(step.name, f"Read {rows} row(s) in {duration_ms}ms.")
         return df
 
@@ -206,6 +210,8 @@ class PipelineExecutor:
             step.name,
             {"rows_in": rows_in, "rows_out": rows_out, "duration_ms": duration_ms},
         )
+        from app.metrics import pipeline_processing_latency_seconds
+        pipeline_processing_latency_seconds.labels(step.name).observe(duration_ms / 1000)
         ctx.log_info(
             step.name,
             f"Processor '{step.plugin_type}' complete: {rows_in} → {rows_out} rows "
@@ -233,6 +239,8 @@ class PipelineExecutor:
         duration_ms = round((time.perf_counter() - t0) * 1000, 2)
         meta_with_timing = {**write_meta, "duration_ms": duration_ms}
         ctx.record_stage(step.name, meta_with_timing)
+        from app.metrics import pipeline_processing_latency_seconds
+        pipeline_processing_latency_seconds.labels(step.name).observe(duration_ms / 1000)
         ctx.log_info(
             step.name,
             f"Wrote {write_meta.get('rows_written', '?')} row(s) to "
@@ -461,6 +469,8 @@ class PipelineExecutor:
         msg = f"Step '{step.name}' failed: {type(exc).__name__}: {exc}"
         ctx.log_error(step.name, msg)
         ctx.status = "failed"
+        from app.metrics import pipeline_errors_total
+        pipeline_errors_total.labels(step.name).inc()
         logger.error("Pipeline step '%s' failed: %s", step.name, exc, exc_info=True)
         raise PipelineExecutionError(
             message=msg,

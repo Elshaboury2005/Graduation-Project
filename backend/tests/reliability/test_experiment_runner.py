@@ -215,13 +215,12 @@ class TestExperimentRunnerLifecycle:
         config = _make_experiment_config(duration=1)
         db = _make_mock_db()
 
-        observed_statuses = []
+        observed_stages = []
 
         # Track every status assignment
         def track_add(obj):
-            if hasattr(obj, "status"):
-                if obj.status not in observed_statuses:
-                    observed_statuses.append(obj.status)
+            if getattr(obj, "stage", None) and obj.stage not in observed_stages:
+                observed_stages.append(obj.stage)
 
         db.add.side_effect = track_add
 
@@ -267,9 +266,9 @@ class TestExperimentRunnerLifecycle:
             "monitoring", "rolling_back",
         ]
         for stage in expected_stages:
-            assert stage in observed_statuses, (
+            assert stage in observed_stages, (
                 f"Expected status '{stage}' was never set. "
-                f"Observed: {observed_statuses}"
+                f"Observed: {observed_stages}"
             )
 
     def test_result_is_pass_when_criteria_met(self) -> None:

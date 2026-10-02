@@ -307,7 +307,7 @@ async def get_experiment(
         "faultType": params.get("fault_type", "not started"),
         "status": latest_run.status if latest_run else "pending",
         "createdAt": experiment.created_at.isoformat(),
-        "lifecycleStage": latest_run.status if latest_run else "pending",
+        "lifecycleStage": latest_run.stage if latest_run and latest_run.stage else "pending",
         "logs": [
             f"Target: {params.get('target_service', 'not started')}",
             f"Fault: {params.get('fault_type', 'not started')}",

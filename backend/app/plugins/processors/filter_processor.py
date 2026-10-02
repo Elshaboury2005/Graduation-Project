@@ -12,24 +12,11 @@ they reach the pandas expression evaluator.
 
 from __future__ import annotations
 
-import re
-
 import pandas as pd
 
 from app.plugins.base import PluginConfigError, ProcessorPlugin
 from app.plugins.registry import registry
-
-# Patterns that are never valid in a DataFrame filter condition and could
-# indicate an attempt to execute arbitrary Python via pandas' query engine.
-_UNSAFE_PATTERNS: list[str] = [
-    "__",        # dunder access (__class__, __import__, etc.)
-    "import",    # module imports
-    "exec(",     # code execution
-    "eval(",     # expression evaluation
-    "open(",     # file access
-    "os.",       # OS module access
-    "sys.",      # sys module access
-]
+from app.pipeline.filter_expression import validate_filter_condition
 
 
 def _validate_condition(condition: str) -> None:
@@ -49,15 +36,10 @@ def _validate_condition(condition: str) -> None:
     PluginConfigError
         The condition contains a pattern that could be used for injection.
     """
-    condition_lower = condition.lower()
-    for pattern in _UNSAFE_PATTERNS:
-        if pattern in condition_lower:
-            raise PluginConfigError(
-                f"FilterProcessor: condition {condition!r} contains the "
-                f"disallowed pattern '{pattern}'.  "
-                "Only simple boolean expressions referencing column names are "
-                "permitted (e.g. 'amount > 0 and status == \"active\"')."
-            )
+    try:
+        validate_filter_condition(condition)
+    except ValueError as exc:
+        raise PluginConfigError(f"FilterProcessor: {exc}") from exc
 
 
 @registry.register_processor

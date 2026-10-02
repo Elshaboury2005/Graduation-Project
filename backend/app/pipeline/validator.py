@@ -31,6 +31,8 @@ import logging
 
 from app.pipeline.config_models import AggregateOperation, PipelineConfig
 from app.pipeline.exceptions import ValidationErrorDetail
+from app.pipeline.config_models import FilterOperation
+from app.pipeline.filter_expression import validate_filter_condition
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +80,7 @@ class PipelineBusinessValidator:
         errors.extend(self._check_api_source_requires_url(config))
         errors.extend(self._check_storage_path_is_absolute(config))
         errors.extend(self._check_no_duplicate_schema_columns(config))
+        errors.extend(self._check_filter_conditions(config))
 
         if errors:
             logger.debug(
@@ -85,6 +88,17 @@ class PipelineBusinessValidator:
                 len(errors),
                 config.pipeline.name,
             )
+        return errors
+
+    def _check_filter_conditions(self, config: PipelineConfig) -> list[ValidationErrorDetail]:
+        errors: list[ValidationErrorDetail] = []
+        for idx, operation in enumerate(config.processing.operations):
+            if not isinstance(operation, FilterOperation):
+                continue
+            try:
+                validate_filter_condition(operation.condition)
+            except ValueError as exc:
+                errors.append({"field": f"processing.operations.{idx}.condition", "message": str(exc)})
         return errors
 
     # ── Rule implementations ───────────────────────────────────────────────────

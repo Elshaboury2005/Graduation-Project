@@ -78,24 +78,7 @@ at runtime.  To add a new allowed service, it must be added here explicitly
 in a code review, not by configuration.
 """
 
-ACTIVE_EXPERIMENT_STATUSES: frozenset[str] = frozenset(
-    {
-        "created",
-        "pending",
-        "validating",
-        "preparing",
-        "baseline",
-        "injecting",
-        "monitoring",
-        "rolling_back",
-        "waiting_for_recovery",
-        "validating_data",
-        "collecting_metrics",
-        "analyzing",
-        "cleaning_up",
-        "generating_report",
-    }
-)
+ACTIVE_EXPERIMENT_STATUSES: frozenset[str] = frozenset({"pending", "running"})
 """All non-terminal ChaosLab lifecycle states."""
 
 TERMINAL_EXPERIMENT_STATUSES: frozenset[str] = frozenset(

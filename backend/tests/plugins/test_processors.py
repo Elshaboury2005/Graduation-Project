@@ -168,6 +168,16 @@ class TestFilterProcessor:
         with pytest.raises(PluginConfigError):
             FilterProcessor().process(df, {"condition": "nonexistent_col > 0"})
 
+    def test_column_containing_import_is_allowed(self) -> None:
+        df = pd.DataFrame({"important": [1, 2, 3]})
+        assert len(FilterProcessor().process(df, {"condition": "important > 1"})) == 2
+
+    @pytest.mark.parametrize("condition", ["__import__('os')", "value.real > 1", "eval('1') == 1"])
+    def test_calls_and_attribute_access_are_rejected(self, condition) -> None:
+        df = pd.DataFrame({"value": [1, 2, 3]})
+        with pytest.raises(PluginConfigError):
+            FilterProcessor().process(df, {"condition": condition})
+
     def test_plugin_type_is_filter(self) -> None:
         assert FilterProcessor.plugin_type == "filter"
 

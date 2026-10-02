@@ -170,6 +170,7 @@ class ExperimentRunner:
         self._safety.enforce_max_concurrent_experiments(
             self._db, excluding_run_id=run_id
         )
+        run.status = "running"
         logger.info(
             "ExperimentRunner: created run %s (experiment=%s).",
             run_id,
@@ -276,6 +277,9 @@ class ExperimentRunner:
             ),
         )
         self._merge_results(run, {"recovery_time_seconds": recovery_time})
+        if recovery_time is not None:
+            from app.metrics import pipeline_recovery_time_seconds
+            pipeline_recovery_time_seconds.labels(target_service).observe(recovery_time)
 
         # ── VALIDATE DATA ─────────────────────────────────────────────────────
         self._update_status(run, "validating_data")
@@ -324,6 +328,10 @@ class ExperimentRunner:
         self._db.flush()
 
         report = self._reporter.generate(run_id, self._db)
+        from app.metrics import experiment_duration_seconds
+        experiment_duration_seconds.labels(fault_type).observe(
+            time.monotonic() - experiment_start
+        )
         self._db.commit()
 
         logger.info(
@@ -488,7 +496,7 @@ class ExperimentRunner:
 
     def _update_status(self, run: Any, status: str) -> None:
         """Persist the current lifecycle stage to the database."""
-        run.status = status
+        run.stage = status
         self._db.add(run)
         self._db.flush()
         logger.debug("ExperimentRunner: run %s → status='%s'.", run.id, status)

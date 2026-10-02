@@ -39,7 +39,13 @@ class ExperimentRun(Base):
         nullable=False,
         default="pending",
         server_default="pending",
-        comment="Lifecycle status: pending | running | succeeded | failed | cancelled.",
+        comment="Run status: pending | running | succeeded | failed | cancelled.",
+    )
+
+    stage: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+        comment="Detailed ChaosLab lifecycle stage while status is running.",
     )
 
     params: Mapped[dict | None] = mapped_column(
